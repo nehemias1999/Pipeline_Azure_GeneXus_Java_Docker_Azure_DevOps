@@ -1,0 +1,228 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  name: 'Java_Application_agentpool'
+
+variables:
+- group: Java_Application-Secrets
+
+- name: MSBuildPath
+  value: 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin'
+
+- name: Genexus18U10Path
+  value: 'C:\Program Files (x86)\GeneXus\GeneXus18U10'
+
+- name: ServerUserName
+  value: 'local\admin'
+
+- name: WorkingDirectory
+  value: 'C:\applications\Java_Application'
+
+- name: WorkingVersion
+  value: 'development'
+
+- name: WorkingEnvironment
+  value: 'DEV'
+
+- name: ForceRebuild
+  value: 'false'
+
+- name: CompileMains
+  value: 'true'
+
+- name: ExtraMSBuild
+  value: '$(Genexus18U10Path)\ApplicationServers\Templates\JavaWeb\msbuild\TomcatContextSettings.msbuild'
+
+- name: ApplicationKey
+  value: '511E367C6E63916D03F8FC8A5F0FB6DCD988FBBACA2256A08490B3E8617D722C'
+
+- name: TargetJRE
+  value: '9'
+
+- name: DeployTarget
+  value: '$(Genexus18U10Path)\DeploymentTargets\Local\local.targets'
+
+- name: PackageFormat
+  value: 'Automatic'
+
+- name: Timestamp
+  value: 'JAVA_APPLICATION_DEV'
+
+- name: DeploymentUnit
+  value: 'JAVA_APPLICATION_DU'
+
+- name: TargetID
+  value: 'Local'
+
+- name: ApplicationServer
+  value: 'Tomcat 10.1'
+
+- name: ProjectName
+  value: 'JAVA_APPLICATION_DEV'
+
+- name: IncludeGAM
+  value: 'true'
+
+- name: IncludeGXFlowBackoffice
+  value: 'true'
+
+- name: EnableKBN
+  value: 'false'
+
+- name: APPUpdate
+  value: 'None'
+
+- name: DeployFullPath
+  value: '$(WorkingDirectory)\$(WorkingEnvironment)\web'
+
+- name: DeployType
+  value: 'Binaries'
+
+- name: OutputGXDPROJFilePath
+  value: '$(WorkingDirectory)\$(WorkingEnvironment)\web'
+
+- name: GXDPROJFilePath
+  value: '$(OutputGXDPROJFilePath)\$(ProjectName).gxdproj'
+
+- name: OutputWARFilePath
+  value: '$(WorkingDirectory)\$(WorkingEnvironment)\Deploy\LOCAL'
+
+- name: WARFilePath
+  value: '$(OutputWARFilePath)\$(ProjectName).war'
+
+- name: EnvironmentPath
+  value: '$(WorkingDirectory)\$(WorkingEnvironment)'
+
+- name: SSHUser
+  value: 'sshadmin'
+
+- name: SSHHost
+  value: '10.200.200.200'
+
+- name: LocalAzureReposityPath
+  value: 'C:\Projects\Environments\$(WorkingEnvironment)'
+
+stages:
+
+  - stage: UpdateKB
+    displayName: 'Update KB'
+    jobs:
+      - job: UpdateJob
+        displayName: 'Update Job'
+        steps:
+          - checkout: self
+
+          - task: CmdLine@2
+            displayName: 'Update KB (GeneXus TeamDev.msbuild)'
+            inputs:
+              script: |
+                "$(MSBuildPath)\MSBuild.exe" "$(Genexus18U10Path)\TeamDev.msbuild" ^
+                  /p:DbaseServerUsername="$(ServerUserName)" ^
+                  /p:DbaseServerPassword="$(ServerPassword)" ^
+                  /p:WorkingDirectory="$(WorkingDirectory)" ^
+                  /p:WorkingVersion="$(WorkingVersion)" ^
+                  /p:WorkingEnvironment="$(WorkingEnvironment)" ^
+                  /p:ServerUsername="$(ServerUserName)" ^
+                  /p:ServerPassword="$(ServerPassword)" ^
+                  /t:Update
+
+  - stage: BuildKB
+    displayName: 'Build KB'
+    dependsOn: UpdateKB
+    condition: succeeded()
+    jobs:
+      - job: BuildJob
+        displayName: 'Build Job'
+        steps:
+          - checkout: self
+
+          - task: CmdLine@2
+            displayName: 'Build KB (GeneXus TeamDev.msbuild)'
+            inputs:
+              script: |
+                "$(MSBuildPath)\MSBuild.exe" "$(Genexus18U10Path)\TeamDev.msbuild" ^
+                  /p:DbaseServerUsername="$(ServerUserName)" ^
+                  /p:DbaseServerPassword="$(ServerPassword)" ^
+                  /p:WorkingDirectory="$(WorkingDirectory)" ^
+                  /p:WorkingVersion="$(WorkingVersion)" ^
+                  /p:WorkingEnvironment="$(WorkingEnvironment)" ^
+                  /p:ForceRebuild="$(ForceRebuild)" ^
+                  /p:CompileMains="$(CompileMains)" ^
+                  /t:Build
+
+  - stage: CreateWARFile
+    displayName: 'Create WAR file'
+    dependsOn: BuildKB
+    condition: succeeded()
+    jobs:
+      - job: CreateWARFileJob
+        displayName: 'Create WAR Job'
+        steps:
+          - checkout: self
+
+          - task: CmdLine@2
+            displayName: 'Create Deploy Project (.gxdproj)'
+            inputs:
+              script: |
+                "$(MSBuildPath)\MSBuild.exe" "$(Genexus18U10Path)\Deploy.msbuild" ^
+                  /p:KBPath="$(WorkingDirectory)" ^
+                  /p:KBVersion="$(WorkingVersion)" ^
+                  /p:KBEnvironment="$(WorkingEnvironment)" ^
+                  /p:EXTRA_MSBUILD="$(ExtraMSBuild)" ^
+                  /p:APPLICATION_KEY="$(ApplicationKey)" ^
+                  /p:TARGET_JRE="$(TargetJRE)" ^
+                  /p:DEPLOY_TARGETS="$(DeployTarget)" ^
+                  /p:PACKAGE_FORMAT="$(PackageFormat)" ^
+                  /p:TimeStamp="$(Timestamp)" ^
+                  /p:DeploymentUnit="$(DeploymentUnit)" ^
+                  /p:TargetId="$(TargetID)" ^
+                  /p:ApplicationServer="$(ApplicationServer)" ^
+                  /p:ProjectName="$(ProjectName)" ^
+                  /p:INCLUDE_GAM="$(IncludeGAM)" ^
+                  /p:INCLUDE_GXFLOW_BACKOFFICE="$(IncludeGXFlowBackoffice)" ^
+                  /p:ENABLE_KBN="$(EnableKBN)" ^
+                  /p:APP_UPDATE="$(APPUpdate)" ^
+                  /p:OutputPath="$(DeployFullPath)" ^
+                  /p:DEPLOY_TYPE="$(DeployType)" ^
+                  /t:CreateDeploy
+
+          - task: CmdLine@2
+            displayName: 'Build WAR from .gxdproj'
+            inputs:
+              script: |
+                "$(MSBuildPath)\MSBuild.exe" "$(GXDPROJFilePath)"
+
+  - stage: DeployOnRemoteDockerContainer
+    displayName: 'Deploy to remote Docker container'
+    dependsOn: SetAndCreateFinalWARFile
+    condition: succeeded()
+    jobs:
+      - job: DeployOnRemoteDockerContainerJob
+        displayName: 'Remote Deploy Job'
+        steps:
+          - checkout: self
+
+          - task: CmdLine@2
+            displayName: 'Deploy WAR to remote Docker container'
+            inputs:
+              script: |
+                call bat\deployOnRemoteDockerContainer.bat "$(SSHUser)" "$(SSHHost)" "$(WARFilePath)"
+
+  - stage: PushToAzure
+    displayName: 'Push image/artifacts to Azure'
+    dependsOn: DeployOnRemoteDockerContainer
+    condition: succeeded()
+    jobs:
+      - job: PushToAzureJob
+        displayName: 'Push Job'
+        steps:
+          - checkout: self
+
+          - task: CmdLine@2
+            displayName: 'Run pushToAzureRepository script'
+            inputs:
+              script: |
+                call bat\pushToAzureRepository.bat "$(LocalAzureReposityPath)" "$(PATToken)" "$(WARFilePath)"
