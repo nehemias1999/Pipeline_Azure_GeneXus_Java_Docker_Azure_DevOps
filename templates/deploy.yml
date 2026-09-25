@@ -11,9 +11,16 @@
 #   .ssh/known_hosts versionado, BatchMode=yes y ConnectTimeout; la llave se
 #   borra del agente al terminar (paso always). Clonado solo via
 #   System.AccessToken; prohibido PAT en URL/CLI.
-#   Falla si algun parametro esta vacio. La descarga real del artefacto
-#   (REQ-03) y el deploy endurecido con healthcheck/rollback (REQ-04) se
-#   agregan aqui mismo en sus REQs sin cambiar la interfaz.
+#   Falla si algun parametro esta vacio. La descarga del artefacto por
+#   version exacta con verificacion SHA (REQ-03) vive aqui; el deploy
+#   endurecido con healthcheck/rollback (REQ-04) se agrega en su REQ
+#   sin cambiar la interfaz.
+# REQ-03 artefactos: descarga el Universal Package java-application-dev
+#   por version EXACTA y verifica sha256sum -c antes de cualquier copia;
+#   ante mismatch el pipeline falla cerrado. Queda prohibido resolver
+#   el flotante `latest`: el escenario "Verificacion de integridad" exige
+#   el artefacto exacto que publico Build.
+#   Fuente: https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/universal-packages-v0
 # ==============================================================================
 
 parameters:
@@ -135,15 +142,36 @@ jobs:
                     -o ConnectTimeout=10 \
                     "${{ parameters.sshTarget }}" true
 
-            # Placeholder: el deploy real (checksum, backup, healthcheck)
-            # lo implementa REQ-04 manteniendo esta interfaz.
+            # REQ-03: descarga el Universal Package por version EXACTA desde
+            # el feed interno. vstsPackageVersion nunca usa comodines ni
+            # latest: el escenario "Verificacion de integridad" exige el
+            # artefacto exacto que publico Build.
+            # Fuente: https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/universal-packages-v0
+            - task: UniversalPackages@0
+              displayName: Descargar artefacto versionado
+              inputs:
+                command: download
+                downloadDirectory: $(System.DefaultWorkingDirectory)/artifact
+                feedsToUse: internal
+                vstsFeed: ${{ parameters.artifactFeed }}
+                vstsFeedPackage: java-application-dev
+                vstsPackageVersion: ${{ parameters.version }}
+
+            # REQ-03: verifica el SHA256 publicado ANTES de cualquier copia.
+            # sha256sum -c sale !=0 ante mismatch y la tarea (failOnStderr)
+            # falla el deploy sin tocar el servidor.
             - task: Bash@3
-              displayName: Deploy (placeholder REQ-01)
+              displayName: Verificar SHA256 antes de copiar
               inputs:
                 targetType: inline
                 failOnStderr: true
                 script: |
-                  echo "Deploy placeholder ${{ parameters.version }} en ${{ parameters.environment }}"
+                  cd "$(System.DefaultWorkingDirectory)/artifact"
+                  sha256sum -c ./*.war.sha256
+                  echo "SHA256 OK: version ${{ parameters.version }} integra desde ${{ parameters.artifactFeed }}"
+
+            # Nota REQ-04: la copia al servidor, backup y healthcheck se
+            # agregan aqui manteniendo esta interfaz.
 
             # Higiene: la llave privada nunca queda en el agente.
             - task: Bash@3

@@ -1,18 +1,26 @@
 # ==============================================================================
-# templates/build.yml — Pasos de compilacion reutilizables (REQ-01).
-# Proposito: compilar una sola vez y promover el mismo artefacto inmutable
-#   por entorno (sin rebuild por entorno). El build GeneXus/MSBuild completo
-#   y la publicacion del WAR en Artifacts los implementan REQ-03/REQ-04.
-# Uso: referenciado desde el stage Build de azure-pipelines.yml con el
-#   parametro version (formato 1.0.<BuildId>).
+# templates/build.yml — Compilacion + publicacion versionada (REQ-01/REQ-03).
+# Proposito: compilar una sola vez y publicar el WAR como Universal Package
+#   inmutable java-application-dev:<version> en Azure Artifacts, con .sha256
+#   y SBOM CycloneDX; luego etiqueta el commit con v<version>. El deploy
+#   (templates/deploy.yml) descarga esa version exacta y verifica el SHA.
+# Uso: referenciado desde el stage Build de azure-pipelines.yml con los
+#   parametros version (formato 1.0.<BuildId>) y artifactFeed.
 # REQ-02 secretos: el build consume $(ApplicationKey) y $(ServerPassword)
 #   desde Key Vault (resueltos en azure-pipelines.yml); aqui solo se valida
-#   que estan presentes, sin imprimir valores. El build GeneXus/MSBuild
-#   completo los usa en REQ-03/REQ-04.
+#   que estan presentes, sin imprimir valores.
+# REQ-03 artefactos: el WAR lo produce el build GeneXus/MSBuild del agente
+#   en $(Build.ArtifactStagingDirectory) (punto de extension documentado);
+#   este template lo empaqueta (SHA256 + SBOM), lo publica y crea el tag.
+#   Nombres de package en minusculas con guiones, segun
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/universal-packages-v0
 # ==============================================================================
 
 parameters:
   - name: version
+    type: string
+    default: ""
+  - name: artifactFeed
     type: string
     default: ""
 
@@ -28,7 +36,31 @@ steps:
           echo "version vacia: se requiere 1.0.<BuildId>" >&2
           exit 1
         fi
+        if [ -z "${{ parameters.artifactFeed }}" ]; then
+          echo "artifactFeed vacio: se requiere el feed de Artifacts" >&2
+          exit 1
+        fi
         echo "Building version ${{ parameters.version }}"
+
+  # REQ-03: gate de binarios — el pipeline falla si hay un WAR trackeado
+  # (los binarios viven en Artifacts, nunca en Git; ver escenario
+  # "WAR bloqueado en Git" de la spec). Sin sustitucion $() para no
+  # colisionar con la sintaxis de macros $(...) de Azure Pipelines.
+  - task: Bash@3
+    displayName: Rechazar WAR trackeados en Git
+    inputs:
+      targetType: inline
+      failOnStderr: true
+      script: |
+        git ls-files "*.war" > .war-tracked.txt
+        if [ -s .war-tracked.txt ]; then
+          echo "WAR trackeado en Git: usar Azure Artifacts, no commitear binarios" >&2
+          cat .war-tracked.txt >&2
+          rm --force .war-tracked.txt
+          exit 1
+        fi
+        rm --force .war-tracked.txt
+        echo "sin WAR trackeados en Git"
 
   # Placeholder de compilacion: el build real (GeneXus/MSBuild) llega con
   # REQ-03/REQ-04; aqui se deja el punto de extension sin duplicar YAML.
@@ -56,3 +88,86 @@ steps:
           exit 1
         fi
         echo "secretos de build presentes (valores no mostrados)"
+
+  # REQ-03: empaqueta el WAR que dejo el build GeneXus/MSBuild en staging
+  # y genera su .sha256. Falla si no hay WAR (publicar vacio esta prohibido).
+  # Nota: GeneXus/MSBuild real no corre en validacion local; en el agente
+  # Windows el build deja el .war en $(Build.ArtifactStagingDirectory).
+  - task: Bash@3
+    displayName: Empaquetar WAR con SHA256
+    inputs:
+      targetType: inline
+      failOnStderr: true
+      script: |
+        stage="$(Build.ArtifactStagingDirectory)"
+        pkg="$stage/universal-package"
+        mkdir --parents "$pkg"
+        found=0
+        for war in "$stage"/*.war; do
+          if [ ! -e "$war" ]; then
+            continue
+          fi
+          found=1
+          cp "$war" "$pkg/"
+          base="${war##*/}"
+          # Ruta relativa dentro del .sha256: la verificacion corre en el
+          # directorio de descarga del deploy (otra maquina), no en staging.
+          (cd "$pkg" && sha256sum "$base" > "$base.sha256")
+        done
+        if [ "$found" -eq 0 ]; then
+          echo "sin WAR en $stage: el build GeneXus/MSBuild debe dejar el .war aqui" >&2
+          exit 1
+        fi
+        echo "paquete preparado en $pkg para version ${{ parameters.version }}"
+
+  # REQ-03: SBOM CycloneDX del paquete. Si syft esta en el agente se usa
+  # (fuente: https://github.com/anchore/syft — `syft <dir> -o cyclonedx-json`);
+  # si no, se genera un manifest documentado como placeholder y el paso
+  # indica instalar syft en el agente para el SBOM real.
+  - task: Bash@3
+    displayName: Generar SBOM CycloneDX
+    inputs:
+      targetType: inline
+      failOnStderr: true
+      script: |
+        pkg="$(Build.ArtifactStagingDirectory)/universal-package"
+        if command -v syft > /dev/null 2>&1; then
+          syft "$pkg" -o "cyclonedx-json=$pkg/sbom.cyclonedx.json"
+        else
+          printf '{\n  "bomFormat": "CycloneDX",\n  "specVersion": "1.5",\n  "version": 1,\n  "metadata": {\n    "component": {\n      "name": "java-application-dev",\n      "version": "${{ parameters.version }}"\n    },\n    "notes": "PLACEHOLDER: syft ausente en el agente; instalar syft para SBOM real"\n  },\n  "components": []\n}\n' > "$pkg/sbom.cyclonedx.json"
+          echo "syft ausente: SBOM placeholder generado; instalar syft en el agente"
+        fi
+        echo "SBOM CycloneDX listo: $pkg/sbom.cyclonedx.json"
+
+  # REQ-03: publica WAR + .sha256 + SBOM como Universal Package versionado.
+  # Fuente: https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/universal-packages-v0
+  - task: UniversalPackages@0
+    displayName: Publicar WAR en Azure Artifacts
+    inputs:
+      command: publish
+      publishDirectory: $(Build.ArtifactStagingDirectory)/universal-package
+      feedsToUsePublish: internal
+      vstsFeedPublish: ${{ parameters.artifactFeed }}
+      vstsFeedPackagePublish: java-application-dev
+      versionOption: custom
+      versionPublish: ${{ parameters.version }}
+      packagePublishDescription: WAR java-application-dev ${{ parameters.version }}
+
+  # REQ-03: etiqueta el commit con v<version>. El checkout usa
+  # persistCredentials: true (azure-pipelines.yml), asi el push viaja con
+  # System.AccessToken (OAuth del build); prohibido token personal en URL/CLI.
+  # Fuente token: https://learn.microsoft.com/en-us/azure/devops/pipelines/release/options
+  # (Allow scripts to access the OAuth token / System.AccessToken).
+  - task: Bash@3
+    displayName: Etiquetar commit v<version>
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+    inputs:
+      targetType: inline
+      failOnStderr: true
+      script: |
+        git config user.name "Azure Pipelines"
+        git config user.email "azure-pipelines@example.invalid"
+        git tag -a "v${{ parameters.version }}" -m "Release v${{ parameters.version }} (commit $(Build.SourceVersion))"
+        git push origin "v${{ parameters.version }}"
+        echo "tag v${{ parameters.version }} publicado"
