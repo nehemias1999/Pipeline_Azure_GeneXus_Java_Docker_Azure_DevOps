@@ -1,0 +1,18 @@
+# ==============================================================================
+# templates/security-scan.yml — Stub de gates de seguridad (REQ-01).
+# Proposito: punto de extension para los gates bloqueantes de REQ-05
+#   (Gitleaks + Trivy + yamllint). Aqui solo verifica que el stub corre en
+#   verde dentro de Build/PR sin bloquear.
+# Uso: referenciado como steps desde el stage Build; REQ-05 lo completara
+#   sin cambiar azure-pipelines.yml.
+# ==============================================================================
+
+steps:
+  # Stub intencional: exito siempre; REQ-05 agrega los scans bloqueantes.
+  - task: Bash@3
+    displayName: Security scan (stub REQ-01)
+    inputs:
+      targetType: inline
+      failOnStderr: true
+      script: |
+        echo "security-scan stub: REQ-05 agregara Gitleaks/Trivy/yamllint"

@@ -1,0 +1,62 @@
+# ==============================================================================
+# templates/deploy.yml — Deploy parametrizado por entorno (REQ-01).
+# Proposito: desplegar el artefacto exacto segun environment/version sin
+#   duplicar YAML por entorno; QA/PROD esperan approval del environment.
+# Uso: jobs -> template con parameters { environment, version, artifactFeed }.
+#   Falla si algun parametro esta vacio. La descarga real del artefacto
+#   (REQ-03) y el deploy endurecido con healthcheck/rollback (REQ-04) se
+#   agregan aqui mismo en sus REQs sin cambiar la interfaz.
+# ==============================================================================
+
+parameters:
+  - name: environment
+    type: string
+    default: ""
+  - name: version
+    type: string
+    default: ""
+  - name: artifactFeed
+    type: string
+    default: ""
+
+jobs:
+  - deployment: Deploy
+    displayName: Desplegar version parametrizada
+    timeoutInMinutes: 30
+    environment: ${{ parameters.environment }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            # Valida parametros: sin environment/version/feed no hay deploy.
+            - task: Bash@3
+              displayName: Validar parametros de deploy
+              inputs:
+                targetType: inline
+                failOnStderr: true
+                script: |
+                  if [ -z "${{ parameters.environment }}" ]; then
+                    echo "environment vacio" >&2
+                    exit 1
+                  fi
+                  if [ -z "${{ parameters.version }}" ]; then
+                    echo "version vacia" >&2
+                    exit 1
+                  fi
+                  if [ -z "${{ parameters.artifactFeed }}" ]; then
+                    echo "artifactFeed vacio" >&2
+                    exit 1
+                  fi
+                  echo "Deploy ${{ parameters.version }} a" \
+                    "${{ parameters.environment }} desde" \
+                    "${{ parameters.artifactFeed }}"
+
+            # Placeholder: el deploy real (checksum, backup, healthcheck)
+            # lo implementa REQ-04 manteniendo esta interfaz.
+            - task: Bash@3
+              displayName: Deploy (placeholder REQ-01)
+              inputs:
+                targetType: inline
+                failOnStderr: true
+                script: |
+                  echo "Deploy placeholder ${{ parameters.version }} en ${{ parameters.environment }}"

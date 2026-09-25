@@ -1,0 +1,37 @@
+# ==============================================================================
+# templates/build.yml — Pasos de compilacion reutilizables (REQ-01).
+# Proposito: compilar una sola vez y promover el mismo artefacto inmutable
+#   por entorno (sin rebuild por entorno). El build GeneXus/MSBuild completo
+#   y la publicacion del WAR en Artifacts los implementan REQ-03/REQ-04.
+# Uso: referenciado desde el stage Build de azure-pipelines.yml con el
+#   parametro version (formato 1.0.<BuildId>).
+# ==============================================================================
+
+parameters:
+  - name: version
+    type: string
+    default: ""
+
+steps:
+  # Falla rapido si no se paso la version (evita artefactos sin version).
+  - task: Bash@3
+    displayName: Validar parametro version
+    inputs:
+      targetType: inline
+      failOnStderr: true
+      script: |
+        if [ -z "${{ parameters.version }}" ]; then
+          echo "version vacia: se requiere 1.0.<BuildId>" >&2
+          exit 1
+        fi
+        echo "Building version ${{ parameters.version }}"
+
+  # Placeholder de compilacion: el build real (GeneXus/MSBuild) llega con
+  # REQ-03/REQ-04; aqui se deja el punto de extension sin duplicar YAML.
+  - task: Bash@3
+    displayName: Build (placeholder REQ-01)
+    inputs:
+      targetType: inline
+      failOnStderr: true
+      script: |
+        echo "Build placeholder para version ${{ parameters.version }}"
