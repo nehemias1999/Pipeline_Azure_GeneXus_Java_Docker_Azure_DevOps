@@ -8,6 +8,12 @@
 #   environment (DEV/QA/PROD) y version (default 1.0.$(Build.BuildId)).
 # Nota: Azure Pipelines no admite la clave `permissions:` (sintaxis de
 #   GitHub Actions); el token de build ya corre con alcance minimo por defecto.
+# REQ-02 secretos: Key Vault (task AzureKeyVault@2 + variable group
+#   Java_Application-Secrets linkeada); solo referencias $(Secreto), jamas
+#   valores. Checkout via System.AccessToken (persistCredentials); prohibido
+#   PAT en URL/CLI. Rotacion: rotar en Key Vault (la service connection
+#   necesita Get/List); el pipeline falla si un secreto requerido esta vacio.
+# Fuente task: https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/azure-key-vault-v2
 # ==============================================================================
 
 trigger:
@@ -34,12 +40,29 @@ parameters:
     displayName: Version del artefacto
     type: string
     default: 1.0.$(Build.BuildId)
+  # REQ-02: nombres de vault/group por variable (defaults del change).
+  - name: keyVaultName
+    displayName: Nombre del Azure Key Vault
+    type: string
+    default: kv-java-app
+  - name: vaultGroup
+    displayName: Variable group linkeada al Key Vault
+    type: string
+    default: Java_Application-Secrets
 
 variables:
+  # Variable group linkeada a Key Vault (auditoria y rotacion fuera del repo).
+  - group: ${{ parameters.vaultGroup }}
   - name: appVersion
     value: ${{ parameters.version }}
   - name: artifactFeed
     value: java-app-artifacts
+  - name: keyVaultName
+    value: ${{ parameters.keyVaultName }}
+  - name: keyVaultServiceConnection
+    # Service connection ARM con Get/List sobre el vault; se crea una vez en
+    # Project Settings (configuracion, no secreto).
+    value: azure-keyvault-service-connection
 
 # Agente Windows con GeneXus 18U10 + MSBuild (demands evitan pool hardcodeado).
 pool:
@@ -57,7 +80,49 @@ stages:
         displayName: Compilar y publicar metadata
         timeoutInMinutes: 60
         steps:
+          # Checkout con el token del build (System.AccessToken); prohibido
+          # clonar con PAT en la URL o pasarlo por CLI.
           - checkout: self
+            persistCredentials: true
+
+          # REQ-02: descarga secretos desde Key Vault; quedan como variables
+          # enmascaradas (***) en los logs.
+          # Fuente: https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/azure-key-vault-v2
+          - task: AzureKeyVault@2
+            displayName: Descargar secretos de Key Vault
+            inputs:
+              azureSubscription: $(keyVaultServiceConnection)
+              KeyVaultName: ${{ parameters.keyVaultName }}
+              SecretsFilter: ServerPassword,ApplicationKey,SshPrivateKey,SshKnownHosts
+              RunAsPreJob: true
+
+          # Fail-fast: el pipeline FALLA si un secreto requerido esta vacio
+          # (solo se nombran, nunca se imprimen valores).
+          - task: Bash@3
+            displayName: Validar secretos requeridos
+            inputs:
+              targetType: inline
+              failOnStderr: true
+              script: |
+                missing=0
+                if [ -z "$(ServerPassword)" ]; then
+                  echo "secreto requerido vacio: ServerPassword" >&2
+                  missing=1
+                fi
+                if [ -z "$(ApplicationKey)" ]; then
+                  echo "secreto requerido vacio: ApplicationKey" >&2
+                  missing=1
+                fi
+                if [ -z "$(SshPrivateKey)" ]; then
+                  echo "secreto requerido vacio: SshPrivateKey" >&2
+                  missing=1
+                fi
+                if [ -z "$(SshKnownHosts)" ]; then
+                  echo "secreto requerido vacio: SshKnownHosts" >&2
+                  missing=1
+                fi
+                if [ "$missing" -ne 0 ]; then exit 1; fi
+                echo "secretos requeridos presentes (valores no mostrados)"
 
           - template: templates/build.yml
             parameters:

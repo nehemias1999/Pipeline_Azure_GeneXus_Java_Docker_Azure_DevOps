@@ -5,6 +5,10 @@
 #   y la publicacion del WAR en Artifacts los implementan REQ-03/REQ-04.
 # Uso: referenciado desde el stage Build de azure-pipelines.yml con el
 #   parametro version (formato 1.0.<BuildId>).
+# REQ-02 secretos: el build consume $(ApplicationKey) y $(ServerPassword)
+#   desde Key Vault (resueltos en azure-pipelines.yml); aqui solo se valida
+#   que estan presentes, sin imprimir valores. El build GeneXus/MSBuild
+#   completo los usa en REQ-03/REQ-04.
 # ==============================================================================
 
 parameters:
@@ -35,3 +39,20 @@ steps:
       failOnStderr: true
       script: |
         echo "Build placeholder para version ${{ parameters.version }}"
+
+  # REQ-02: fail-fast si los secretos que usara el build GeneXus estan vacios.
+  - task: Bash@3
+    displayName: Validar secretos de build
+    inputs:
+      targetType: inline
+      failOnStderr: true
+      script: |
+        if [ -z "$(ApplicationKey)" ]; then
+          echo "secreto requerido vacio: ApplicationKey" >&2
+          exit 1
+        fi
+        if [ -z "$(ServerPassword)" ]; then
+          echo "secreto requerido vacio: ServerPassword" >&2
+          exit 1
+        fi
+        echo "secretos de build presentes (valores no mostrados)"
