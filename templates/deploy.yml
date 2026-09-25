@@ -13,8 +13,15 @@
 #   System.AccessToken; prohibido PAT en URL/CLI.
 #   Falla si algun parametro esta vacio. La descarga del artefacto por
 #   version exacta con verificacion SHA (REQ-03) vive aqui; el deploy
-#   endurecido con healthcheck/rollback (REQ-04) se agrega en su REQ
-#   sin cambiar la interfaz.
+#   endurecido con healthcheck/rollback (REQ-04) invoca
+#   scripts/deploy-docker-tomcat.sh (Linux) o .ps1 (Windows via pwsh)
+#   con la version exacta, sin cambiar la interfaz.
+# REQ-04 HealthUrl por entorno: el parametro `healthUrl` tiene prioridad; si
+#   viene vacio se resuelve la variable `healthUrl_<ENV>` (p.ej. healthUrl_DEV
+#   del Variable Group del entorno, visible como HEALTHURL_<ENV> en el agente)
+#   y como ultimo default el script usa http://localhost:8080/ (documentado en
+#   la cabecera de cada script). El flujo nuevo nunca referencia el directorio
+#   legacy de scripts Windows (ver README.legacy.md de dicho directorio).
 # REQ-03 artefactos: descarga el Universal Package java-application-dev
 #   por version EXACTA y verifica sha256sum -c antes de cualquier copia;
 #   ante mismatch el pipeline falla cerrado. Queda prohibido resolver
@@ -34,6 +41,9 @@ parameters:
     type: string
     default: ""
   - name: sshTarget
+    type: string
+    default: ""
+  - name: healthUrl
     type: string
     default: ""
 
@@ -170,8 +180,46 @@ jobs:
                   sha256sum -c ./*.war.sha256
                   echo "SHA256 OK: version ${{ parameters.version }} integra desde ${{ parameters.artifactFeed }}"
 
-            # Nota REQ-04: la copia al servidor, backup y healthcheck se
-            # agregan aqui manteniendo esta interfaz.
+            # REQ-04: deploy endurecido via script versionado con la version
+            # EXACTA descargada de Artifacts. Resuelve HealthUrl por entorno:
+            # param `healthUrl` > variable `healthUrl_<ENV>` > default del
+            # script. Sin sshTarget no hay servidor al cual desplegar: se omite
+            # (el chequeo SSH de arriba ya documento la omision).
+            - task: Bash@3
+              displayName: Desplegar en Tomcat via script (Linux)
+              condition: and(succeeded(), ne(variables['Agent.OS'], 'Windows_NT'), ne('${{ parameters.sshTarget }}', ''))
+              inputs:
+                targetType: inline
+                failOnStderr: true
+                script: |
+                  WAR_PATH="$(echo "$(System.DefaultWorkingDirectory)/artifact"/*.war)"
+                  HEALTH_URL_RESOLVED="${{ parameters.healthUrl }}"
+                  if [ -z "$HEALTH_URL_RESOLVED" ]; then
+                    ENV_NAME="$(echo "healthUrl_${{ parameters.environment }}" | tr '[:lower:]' '[:upper:]')"
+                    HEALTH_URL_RESOLVED="${!ENV_NAME:-}"
+                  fi
+                  bash scripts/deploy-docker-tomcat.sh \
+                    --war-path "$WAR_PATH" \
+                    --version "${{ parameters.version }}" \
+                    --ssh-target "${{ parameters.sshTarget }}" \
+                    --health-url "$HEALTH_URL_RESOLVED"
+
+            # REQ-04 gemelo Windows: mismo script en .ps1 via pwsh, misma
+            # version exacta y misma resolucion healthUrl_<ENV>.
+            - task: PowerShell@2
+              displayName: Desplegar en Tomcat via script (Windows)
+              condition: and(succeeded(), eq(variables['Agent.OS'], 'Windows_NT'), ne('${{ parameters.sshTarget }}', ''))
+              inputs:
+                targetType: inline
+                pwsh: true
+                failOnStderr: true
+                script: |
+                  $war = Get-ChildItem "$(System.DefaultWorkingDirectory)/artifact/*.war" | Select-Object -First 1
+                  $healthUrl = "${{ parameters.healthUrl }}"
+                  if ([string]::IsNullOrEmpty($healthUrl)) {
+                    $healthUrl = [Environment]::GetEnvironmentVariable("HEALTHURL_${{ parameters.environment }}")
+                  }
+                  ./scripts/deploy-docker-tomcat.ps1 -WarPath $war.FullName -Version "${{ parameters.version }}" -SshTarget "${{ parameters.sshTarget }}" -HealthUrl $healthUrl
 
             # Higiene: la llave privada nunca queda en el agente.
             - task: Bash@3
