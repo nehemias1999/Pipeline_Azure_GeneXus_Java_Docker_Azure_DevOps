@@ -1,0 +1,128 @@
+# ==============================================================================
+# azure-pipelines.yml — Pipeline multi-stage DEV/QA/PROD (REQ-01).
+# Proposito: reemplaza a Pipeline_Script.yml (stage fantasma del legacy y
+#   secretos hardcodeados); Build siempre verde,
+#   Deploy_DEV automatico en main, Deploy_QA/PROD con environment + approval.
+# Trigger: push a main y validacion PR contra main (solo Build en PR).
+# Uso: corre automatico en Azure DevOps; manual con parametros
+#   environment (DEV/QA/PROD) y version (default 1.0.$(Build.BuildId)).
+# Nota: Azure Pipelines no admite la clave `permissions:` (sintaxis de
+#   GitHub Actions); el token de build ya corre con alcance minimo por defecto.
+# ==============================================================================
+
+trigger:
+  branches:
+    include:
+      - main
+
+# Validacion en PR: solo corre Build, ningun deploy ejecuta (ver conditions).
+pr:
+  branches:
+    include:
+      - main
+
+parameters:
+  - name: environment
+    displayName: Entorno objetivo (runs manuales)
+    type: string
+    default: DEV
+    values:
+      - DEV
+      - QA
+      - PROD
+  - name: version
+    displayName: Version del artefacto
+    type: string
+    default: 1.0.$(Build.BuildId)
+
+variables:
+  - name: appVersion
+    value: ${{ parameters.version }}
+  - name: artifactFeed
+    value: java-app-artifacts
+
+# Agente Windows con GeneXus 18U10 + MSBuild (demands evitan pool hardcodeado).
+pool:
+  name: Java_Application_agentpool
+  demands:
+    - msbuild # MSBuild de Visual Studio 2022 (build GeneXus/Java)
+    - GeneXus_18U10 # GeneXus 18 Upgrade 10 instalado en el agente
+
+stages:
+  # Build: compila una vez y publica pipeline-metadata (version + commit).
+  - stage: Build
+    displayName: Build + validacion PR
+    jobs:
+      - job: BuildJob
+        displayName: Compilar y publicar metadata
+        timeoutInMinutes: 60
+        steps:
+          - checkout: self
+
+          - template: templates/build.yml
+            parameters:
+              version: $(appVersion)
+
+          # Gate minimo de seguridad (stub; REQ-05 agrega Gitleaks/Trivy).
+          - template: templates/security-scan.yml
+
+          # Metadata del pipeline: version exacta + commit para trazabilidad.
+          - task: Bash@3
+            displayName: Generar pipeline-metadata
+            inputs:
+              targetType: inline
+              failOnStderr: true
+              script: |
+                mkdir --parents pipeline-metadata
+                printf 'version=%s\ncommit=%s\n' \
+                  "$(appVersion)" "$(Build.SourceVersion)" \
+                  > pipeline-metadata/version.txt
+                cat pipeline-metadata/version.txt
+          - task: PublishPipelineArtifact@1
+            displayName: Publicar artefacto pipeline-metadata
+            inputs:
+              targetPath: pipeline-metadata
+              artifactName: pipeline-metadata
+
+  # Deploy_DEV: automatico solo en push a main, nunca en PR.
+  - stage: Deploy_DEV
+    displayName: Deploy a DEV
+    dependsOn: Build
+    condition: >-
+      and(succeeded(),
+          ne(variables['Build.Reason'], 'PullRequest'),
+          eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - template: templates/deploy.yml
+        parameters:
+          environment: DEV
+          version: $(appVersion)
+          artifactFeed: $(artifactFeed)
+
+  # Deploy_QA: requiere approval del environment QA en Azure DevOps.
+  - stage: Deploy_QA
+    displayName: Deploy a QA
+    dependsOn: Deploy_DEV
+    condition: >-
+      and(succeeded(),
+          ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - template: templates/deploy.yml
+        parameters:
+          environment: QA
+          version: $(appVersion)
+          artifactFeed: $(artifactFeed)
+
+  # Deploy_PROD: requiere approval del environment PROD en Azure DevOps.
+  - stage: Deploy_PROD
+    displayName: Deploy a PROD
+    dependsOn: Deploy_QA
+    condition: >-
+      and(succeeded(),
+          ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - template: templates/deploy.yml
+        parameters:
+          environment: PROD
+          version: $(appVersion)
+          artifactFeed: $(artifactFeed)
