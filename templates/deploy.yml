@@ -2,7 +2,15 @@
 # templates/deploy.yml — Deploy parametrizado por entorno (REQ-01).
 # Proposito: desplegar el artefacto exacto segun environment/version sin
 #   duplicar YAML por entorno; QA/PROD esperan approval del environment.
-# Uso: jobs -> template con parameters { environment, version, artifactFeed }.
+# Uso: jobs -> template con parameters { environment, version, artifactFeed,
+#   sshTarget }. sshTarget (usuario@host) es opcional: si esta vacio, el
+#   chequeo SSH se omite y REQ-04 provee el host real sin cambiar la interfaz.
+# REQ-02 secretos: AzureKeyVault@2 por job (los deployments no heredan
+#   variables de Build) + fail-fast si un secreto esta vacio. SSH con llave
+#   desde $(SshPrivateKey) (nunca en repo), StrictHostKeyChecking=yes con
+#   .ssh/known_hosts versionado, BatchMode=yes y ConnectTimeout; la llave se
+#   borra del agente al terminar (paso always). Clonado solo via
+#   System.AccessToken; prohibido PAT en URL/CLI.
 #   Falla si algun parametro esta vacio. La descarga real del artefacto
 #   (REQ-03) y el deploy endurecido con healthcheck/rollback (REQ-04) se
 #   agregan aqui mismo en sus REQs sin cambiar la interfaz.
@@ -18,6 +26,9 @@ parameters:
   - name: artifactFeed
     type: string
     default: ""
+  - name: sshTarget
+    type: string
+    default: ""
 
 jobs:
   - deployment: Deploy
@@ -28,6 +39,43 @@ jobs:
       runOnce:
         deploy:
           steps:
+            # REQ-02: los jobs de deploy no heredan variables de Build, por
+            # eso se descargan aqui los secretos (enmascarados *** en logs).
+            # Fuente: https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/azure-key-vault-v2
+            - task: AzureKeyVault@2
+              displayName: Descargar secretos de Key Vault
+              inputs:
+                azureSubscription: $(keyVaultServiceConnection)
+                KeyVaultName: $(keyVaultName)
+                SecretsFilter: ServerPassword,ApplicationKey,SshPrivateKey,SshKnownHosts
+                RunAsPreJob: true
+
+            # Fail-fast: sin secretos no hay deploy (nombres solo, sin valores).
+            - task: Bash@3
+              displayName: Validar secretos requeridos
+              inputs:
+                targetType: inline
+                failOnStderr: true
+                script: |
+                  missing=0
+                  if [ -z "$(ServerPassword)" ]; then
+                    echo "secreto requerido vacio: ServerPassword" >&2
+                    missing=1
+                  fi
+                  if [ -z "$(ApplicationKey)" ]; then
+                    echo "secreto requerido vacio: ApplicationKey" >&2
+                    missing=1
+                  fi
+                  if [ -z "$(SshPrivateKey)" ]; then
+                    echo "secreto requerido vacio: SshPrivateKey" >&2
+                    missing=1
+                  fi
+                  if [ -z "$(SshKnownHosts)" ]; then
+                    echo "secreto requerido vacio: SshKnownHosts" >&2
+                    missing=1
+                  fi
+                  if [ "$missing" -ne 0 ]; then exit 1; fi
+                  echo "secretos requeridos presentes (valores no mostrados)"
             # Valida parametros: sin environment/version/feed no hay deploy.
             - task: Bash@3
               displayName: Validar parametros de deploy
@@ -51,6 +99,42 @@ jobs:
                     "${{ parameters.environment }} desde" \
                     "${{ parameters.artifactFeed }}"
 
+            # SSH endurecido: llave desde Key Vault (nunca en repo) y host
+            # verificado contra .ssh/known_hosts versionado. Si el fingerprint
+            # cambia, SSH falla cerrado (escenario MITM de la spec).
+            - task: Bash@3
+              displayName: Configurar SSH endurecido
+              inputs:
+                targetType: inline
+                failOnStderr: true
+                script: |
+                  mkdir --parents ~/.ssh
+                  chmod 700 ~/.ssh
+                  printf '%s' "$(SshPrivateKey)" > ~/.ssh/id_deploy
+                  chmod 600 ~/.ssh/id_deploy
+                  cp .ssh/known_hosts ~/.ssh/known_hosts
+                  chmod 600 ~/.ssh/known_hosts
+                  ssh-keygen -l -f ~/.ssh/known_hosts
+                  echo "SSH configurado (llave desde Key Vault, host verificado)"
+
+            # Chequeo de conectividad con host verificado; se omite si el
+            # template se invoca sin sshTarget (REQ-04 provee el host real).
+            - task: Bash@3
+              displayName: Verificar conexion SSH
+              inputs:
+                targetType: inline
+                failOnStderr: true
+                script: |
+                  if [ -z "${{ parameters.sshTarget }}" ]; then
+                    echo "sshTarget vacio: chequeo SSH omitido"
+                    exit 0
+                  fi
+                  ssh -i ~/.ssh/id_deploy \
+                    -o StrictHostKeyChecking=yes \
+                    -o BatchMode=yes \
+                    -o ConnectTimeout=10 \
+                    "${{ parameters.sshTarget }}" true
+
             # Placeholder: el deploy real (checksum, backup, healthcheck)
             # lo implementa REQ-04 manteniendo esta interfaz.
             - task: Bash@3
@@ -60,3 +144,14 @@ jobs:
                 failOnStderr: true
                 script: |
                   echo "Deploy placeholder ${{ parameters.version }} en ${{ parameters.environment }}"
+
+            # Higiene: la llave privada nunca queda en el agente.
+            - task: Bash@3
+              displayName: Limpiar llave SSH del agente
+              condition: always()
+              inputs:
+                targetType: inline
+                failOnStderr: true
+                script: |
+                  rm --force ~/.ssh/id_deploy
+                  echo "llave SSH eliminada del agente"

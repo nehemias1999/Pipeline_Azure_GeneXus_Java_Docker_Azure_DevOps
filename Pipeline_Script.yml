@@ -36,8 +36,12 @@ variables:
 - name: ExtraMSBuild
   value: '$(Genexus18U10Path)\ApplicationServers\Templates\JavaWeb\msbuild\TomcatContextSettings.msbuild'
 
+# LEGACY — no usar. Deprecado por REQ-02 (hardening-cicd-pipeline): este archivo
+# historico queda solo como referencia; el pipeline vigente es
+# azure-pipelines.yml, que resuelve ApplicationKey desde Key Vault via la
+# variable group Java_Application-Secrets. No agregar secretos aqui.
 - name: ApplicationKey
-  value: '511E367C6E63916D03F8FC8A5F0FB6DCD988FBBACA2256A08490B3E8617D722C'
+  value: '$(ApplicationKey)'
 
 - name: TargetJRE
   value: '9'
