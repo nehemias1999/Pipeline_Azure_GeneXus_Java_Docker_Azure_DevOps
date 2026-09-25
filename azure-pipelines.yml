@@ -14,6 +14,10 @@
 #   PAT en URL/CLI. Rotacion: rotar en Key Vault (la service connection
 #   necesita Get/List); el pipeline falla si un secreto requerido esta vacio.
 # Fuente task: https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/azure-key-vault-v2
+# REQ-03 artefactos: Build publica el WAR como Universal Package
+#   java-application-dev:$(appVersion) en $(artifactFeed) con .sha256 +
+#   SBOM y tag Git v$(appVersion); los deploys descargan la version exacta.
+# Fuente publish/download: https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/universal-packages-v0
 # ==============================================================================
 
 trigger:
@@ -127,6 +131,7 @@ stages:
           - template: templates/build.yml
             parameters:
               version: $(appVersion)
+              artifactFeed: $(artifactFeed)
 
           # Gate minimo de seguridad (stub; REQ-05 agrega Gitleaks/Trivy).
           - template: templates/security-scan.yml
