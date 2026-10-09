@@ -1,67 +1,67 @@
-# Azure DevOps Pipeline – GeneXus Java Application Deployment with Docker and Azure Repos
+# Pipeline Azure DevOps — GeneXus Java + Docker + Tomcat
 
-## Overview
+CI/CD multi-stage (Build, Deploy_DEV, Deploy_QA, Deploy_PROD) que compila la app Java generada por GeneXus, publica el WAR versionado con SHA256 y lo despliega en Tomcat/Docker con gates de seguridad bloqueantes.
 
-This project implements a **CI/CD pipeline using Azure DevOps** to build, deploy, and publish a **GeneXus-generated Java application**.
+## Table of Contents
 
-The pipeline automates the full lifecycle: building the Knowledge Base, generating a WAR file, deploying it into a Docker container running Apache Tomcat on a remote server, and pushing the WAR artifact to **Azure Repos** for versioning and traceability.
+- [Background](#background)
+- [Install](#install)
+- [Usage](#usage)
+- [API / Configuration](#api--configuration)
+- [Contributing](#contributing)
+- [License](#license)
 
----
+## Background
 
-## High-Level Workflow
+Reemplaza al pipeline legacy (`Pipeline_Script.yml`, scripts `bat/`) que tenia stages fantasma y secretos hardcodeados: ahora el WAR se publica una sola vez como Universal Package inmutable y cada entorno despliega la version exacta con SHA verificado, backup y healthcheck con rollback.
 
-1. Pipeline is triggered on changes to the main branch.
-2. GeneXus Knowledge Base is updated and built.
-3. A WAR deployment package is generated.
-4. The WAR file is finalized and prepared.
-5. The application is deployed to a remote Docker container.
-6. The WAR artifact is committed and pushed to Azure Repos.
+### Tecnologias
 
----
+Azure DevOps Pipelines, GeneXus 18 (Java) + MSBuild, Java / Apache Tomcat, Docker, Azure Artifacts (Universal Packages), Azure Key Vault, Gitleaks + Trivy + yamllint (gates), SSH endurecido.
 
-## Technologies Used
+### Arquitectura / Flujo
 
-- Azure DevOps Pipelines – CI/CD orchestration
-- GeneXus 18 (Java) – Low-code Java application generation
-- MSBuild – Build automation
-- Java / Apache Tomcat – Runtime environment
-- Docker – Containerized deployment
-- SSH / SCP – Secure remote access
-- Batch scripts (.bat) – Automation
-- Git / Azure Repos – Artifact versioning
+`azure-pipelines.yml` (stages Build, Deploy_DEV auto en main, Deploy_QA/PROD con environment + approval) → `templates/build.yml` (compila y publica `java-application-dev:<version>` + `.sha256` + SBOM + tag `v<version>`) → `templates/security-scan.yml` (Gitleaks, Trivy fs/WAR con SARIF, yamllint) → `templates/deploy.yml` (descarga version exacta, verifica SHA, `scripts/deploy-docker-tomcat.sh` o `scripts/deploy-docker-tomcat.ps1` con backup/healthcheck/rollback). Build publica `pipeline-metadata` y `release-summary` (version, commit, artefacto, SHA256, environment, aprobador; retencion 30 dias); cada deploy se anota con timestamp + aprobador (`$(Build.RequestedFor)` en runtime).
 
----
+Spec fuente de verdad: `openspec/changes/hardening-cicd-pipeline/specs/observability-docs/spec.md`.
 
-## Pipeline Steps
+## Install
 
-### 1. Update Knowledge Base
-Synchronizes and updates the GeneXus Knowledge Base using TeamDev tasks.
+Prerrequisitos: agente `Java_Application_agentpool` con demands `msbuild` + `GeneXus_18U10`; feed `java-app-artifacts`; Key Vault `kv-java-app` con service connection `azure-keyvault-service-connection`; variable group `Java_Application-Secrets`; variable `healthUrl_<ENV>` por entorno.
 
-### 2. Build Knowledge Base
-Compiles the GeneXus Java application and generates binaries.
+```bash
+git clone <repo> && cd <repo>
+python3 -m unittest discover -s tests -p "*_test.py"
+```
 
-### 3. Create WAR Package
-Generates the deployment project and builds the WAR file.
+## Usage
 
-### 4. Finalize WAR File
-Applies final configuration to the WAR file for deployment.
+Push a `main` corre Build + Deploy_DEV; QA/PROD avanzan tras approval del environment en Azure DevOps. Run manual con parametros `environment` (DEV/QA/PROD) y `version` (default `1.0.$(Build.BuildId)`). Auditoria de un deploy (ej. `PROD 1.0.42`): descargar el artefacto `release-summary` del build y leer `release-summary.json` (version, commit, sha256, aprobador, timestamp).
 
-### 5. Deploy to Remote Docker Container
-Stops Tomcat, deploys the WAR inside the container, and restarts services.
+## API / Configuration
 
-### 6. Push WAR to Azure Repos
-Commits and pushes the WAR artifact to Azure Repos.
+| Variable | Requerida | Default | Formato |
+|---|---|---|---|
+| `appVersion` | no | `1.0.$(Build.BuildId)` | `1.0.<BuildId>` |
+| `artifactFeed` | no | `java-app-artifacts` | nombre de feed |
+| `keyVaultName` / `vaultGroup` | si | `kv-java-app` / `Java_Application-Secrets` | nombres Azure |
+| `ServerPassword`, `ApplicationKey`, `SshPrivateKey`, `SshKnownHosts` | si (via Key Vault) | — | nunca en repo |
+| `healthUrl_<ENV>` | no | `http://localhost:8080/` | URL http(s) |
+| `releaseRetentionDays` | no | `30` | dias (retencion en Project Settings > Pipelines > Retention) |
 
----
+## Contributing
 
-## Security Considerations
+Entorno local: `python3` + `pyyaml`. Verificaciones (todas en verde antes de PR):
 
-- Secrets are managed using Azure DevOps Variable Groups
-- No credentials are hardcoded
-- SSH connections are non-interactive
+```bash
+python3 -m unittest discover -s tests -p "*_test.py"
+yamllint azure-pipelines.yml templates/deploy.yml
+python3 -c "import yaml; [yaml.safe_load(open(f)) for f in ['azure-pipelines.yml','templates/deploy.yml']]"
+openspec validate --specs
+```
 
----
+Commits: Conventional Commits (`feat(req-06): ...`). Nunca modificar `openspec/` ni tests de otros requisitos.
 
-## Conclusion
+## License
 
-This pipeline provides an enterprise-ready solution for deploying GeneXus Java applications using Docker and Azure Repos.
+MIT.

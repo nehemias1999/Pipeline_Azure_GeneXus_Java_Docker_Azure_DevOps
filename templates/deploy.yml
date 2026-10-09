@@ -28,6 +28,11 @@
 #   el flotante `latest`: el escenario "Verificacion de integridad" exige
 #   el artefacto exacto que publico Build.
 #   Fuente: https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/universal-packages-v0
+# REQ-06 observabilidad: cada deploy se anota con timestamp (UTC) e
+#   identidad del aprobador resuelta en runtime ($(Build.RequestedFor));
+#   el registro queda en el log y en deploy-annotation/annotation.json.
+#   No requiere rediseno: es un step de log/registro, misma interfaz.
+#   Fuente variables: https://learn.microsoft.com/en-us/azure/devops/pipelines/build/variables
 # ==============================================================================
 
 parameters:
@@ -115,6 +120,26 @@ jobs:
                   echo "Deploy ${{ parameters.version }} a" \
                     "${{ parameters.environment }} desde" \
                     "${{ parameters.artifactFeed }}"
+
+            # REQ-06: anotacion de cada deploy con timestamp UTC e identidad
+            # del aprobador (runtime $(Build.RequestedFor), nunca hardcodeada).
+            # Los approvals de los environments QA/PROD quedan ademas en el
+            # historial de checks de Azure DevOps.
+            - task: Bash@3
+              displayName: Anotar deploy (timestamp + aprobador)
+              inputs:
+                targetType: inline
+                failOnStderr: true
+                script: |
+                  TIMESTAMP="$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+                  mkdir --parents deploy-annotation
+                  printf '{"environment":"%s","version":"%s","timestamp":"%s","approver":"%s"}\n' \
+                    "${{ parameters.environment }}" \
+                    "${{ parameters.version }}" \
+                    "$TIMESTAMP" "$(Build.RequestedFor)" \
+                    > deploy-annotation/annotation.json
+                  cat deploy-annotation/annotation.json
+                  echo "deploy ${{ parameters.environment }} ${{ parameters.version }} aprobado por $(Build.RequestedFor) en $TIMESTAMP"
 
             # SSH endurecido: llave desde Key Vault (nunca en repo) y host
             # verificado contra .ssh/known_hosts versionado. Si el fingerprint
