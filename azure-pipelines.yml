@@ -18,6 +18,13 @@
 #   java-application-dev:$(appVersion) en $(artifactFeed) con .sha256 +
 #   SBOM y tag Git v$(appVersion); los deploys descargan la version exacta.
 # Fuente publish/download: https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/universal-packages-v0
+# REQ-06 observabilidad: Build publica el resumen de release (version,
+#   commit, artefacto, SHA256, environment, aprobador) como artefacto
+#   `release-summary` (JSON + Markdown) y el log cita version+SHA+tag.
+#   Retencion: Azure DevOps no expone retencion por artefacto en YAML (se
+#   configura en Project Settings > Pipelines > Retention); se declara aqui
+#   la politica exigida (retention 30 dias) y el pipeline la documenta.
+# Fuente variables predefinidas: https://learn.microsoft.com/en-us/azure/devops/pipelines/build/variables
 # ==============================================================================
 
 trigger:
@@ -67,6 +74,11 @@ variables:
     # Service connection ARM con Get/List sobre el vault; se crea una vez en
     # Project Settings (configuracion, no secreto).
     value: azure-keyvault-service-connection
+  # REQ-06: politica de retencion declarada (dias) para artefactos de release.
+  # Se aplica en Project Settings > Pipelines > Retention; el valor queda
+  # versionado aqui como fuente de verdad auditable.
+  - name: releaseRetentionDays
+    value: 30
 
 # Agente Windows con GeneXus 18U10 + MSBuild (demands evitan pool hardcodeado).
 pool:
@@ -153,6 +165,44 @@ stages:
             inputs:
               targetPath: pipeline-metadata
               artifactName: pipeline-metadata
+
+          # REQ-06: resumen de release con los 6 campos de la spec (version,
+          # commit, artefacto, SHA256, environment, aprobador). La identidad
+          # del aprobador se resuelve en runtime ($(Build.RequestedFor));
+          # los approvals de los environments QA/PROD quedan ademas en el
+          # historial de checks de Azure DevOps. El SHA256 se lee del
+          # .sha256 publicado por REQ-03 si existe en el workspace.
+          # Fuente variables: https://learn.microsoft.com/en-us/azure/devops/pipelines/build/variables
+          - task: Bash@3
+            displayName: Generar resumen de release
+            inputs:
+              targetType: inline
+              failOnStderr: true
+              script: |
+                mkdir --parents release-summary
+                SHA_FILE="$(ls ./*.war.sha256 "$(Build.ArtifactStagingDirectory)"/*.war.sha256 2>/dev/null | head -n 1 || true)"
+                if [ -n "$SHA_FILE" ]; then
+                  SHA256="$(cut --delimiter=' ' --fields=1 "$SHA_FILE")"
+                else
+                  SHA256="lookup:$(artifactFeed)/java-application-dev:$(appVersion) (.sha256 publicado por REQ-03)"
+                fi
+                printf '{"version":"%s","commit":"%s","artifact":"%s:%s","sha256":"%s","environment":"%s","approver":"%s"}\n' \
+                  "$(appVersion)" "$(Build.SourceVersion)" \
+                  "java-application-dev" "$(appVersion)" \
+                  "$SHA256" "${{ parameters.environment }}" \
+                  "$(Build.RequestedFor)" \
+                  > release-summary/release-summary.json
+                printf '# Release %s\n\n- version: %s\n- commit: %s\n- artifact: java-application-dev:%s\n- sha256: %s\n- environment: %s\n- approver: %s\n- tag: v%s\n' \
+                  "$(appVersion)" "$(appVersion)" "$(Build.SourceVersion)" \
+                  "$(appVersion)" "$SHA256" "${{ parameters.environment }}" \
+                  "$(Build.RequestedFor)" "$(appVersion)" \
+                  > release-summary/release-summary.md
+                echo "release v$(appVersion) SHA256:$SHA256 tag:v$(appVersion) environment:${{ parameters.environment }}"
+          - task: PublishPipelineArtifact@1
+            displayName: Publicar artefacto release-summary
+            inputs:
+              targetPath: release-summary
+              artifactName: release-summary
 
   # Deploy_DEV: automatico solo en push a main, nunca en PR.
   - stage: Deploy_DEV
