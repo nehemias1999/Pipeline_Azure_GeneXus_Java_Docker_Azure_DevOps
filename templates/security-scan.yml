@@ -1,18 +1,95 @@
 # ==============================================================================
-# templates/security-scan.yml — Stub de gates de seguridad (REQ-01).
-# Proposito: punto de extension para los gates bloqueantes de REQ-05
-#   (Gitleaks + Trivy + yamllint). Aqui solo verifica que el stub corre en
-#   verde dentro de Build/PR sin bloquear.
-# Uso: referenciado como steps desde el stage Build; REQ-05 lo completara
-#   sin cambiar azure-pipelines.yml.
+# templates/security-scan.yml — Gates de seguridad bloqueantes (REQ-05).
+# Proposito: fallar el Build/PR ante secretos (Gitleaks), vulnerabilidades
+#   HIGH/CRITICAL en filesystem + WAR (Trivy con SARIF) o YAML invalido
+#   (yamllint). Todo hallazgo bloqueante sale != 0 (failed), nunca verde.
+# Uso: referenciado como steps desde el stage Build; misma interfaz que el
+#   stub de REQ-01 (no cambia azure-pipelines.yml).
+# Dependencias (agente CI): gitleaks, trivy, yamllint en PATH.
+# Salida: trivy-fs.sarif + trivy-war.sarif publicados como artefacto SARIF.
 # ==============================================================================
 
 steps:
-  # Stub intencional: exito siempre; REQ-05 agrega los scans bloqueantes.
+  # Gate 1: yamllint bloqueante sobre pipeline y templates (mala config).
   - task: Bash@3
-    displayName: Security scan (stub REQ-01)
+    displayName: Gate yamllint (pipeline/templates)
     inputs:
       targetType: inline
       failOnStderr: true
       script: |
-        echo "security-scan stub: REQ-05 agregara Gitleaks/Trivy/yamllint"
+        if ! command -v yamllint > /dev/null 2>&1; then
+          echo "yamllint no instalado en el agente: gate bloqueado" >&2
+          exit 1
+        fi
+        yamllint azure-pipelines.yml templates/*.yml
+        echo "yamllint OK: pipeline y templates validos"
+
+  # Gate 2: Gitleaks bloqueante. --redact lista el archivo sin exponer el
+  # valor del secreto; cualquier hallazgo sale != 0 y falla el build.
+  - task: Bash@3
+    displayName: Gate Gitleaks (secretos)
+    inputs:
+      targetType: inline
+      failOnStderr: true
+      script: |
+        if ! command -v gitleaks > /dev/null 2>&1; then
+          echo "gitleaks no instalado en el agente: gate bloqueado" >&2
+          exit 1
+        fi
+        gitleaks detect --source . --verbose --redact
+        echo "gitleaks OK: sin secretos detectados"
+
+  # Gate 3a: Trivy filesystem con severidades HIGH,CRITICAL; el SARIF queda
+  # publicado como artefacto aunque el gate falle (--exit-code 1).
+  - task: Bash@3
+    displayName: Gate Trivy filesystem (HIGH/CRITICAL)
+    inputs:
+      targetType: inline
+      failOnStderr: true
+      script: |
+        if ! command -v trivy > /dev/null 2>&1; then
+          echo "trivy no instalado en el agente: gate bloqueado" >&2
+          exit 1
+        fi
+        mkdir --parents $(Build.ArtifactStagingDirectory)/trivy-sarif
+        trivy fs --severity HIGH,CRITICAL --exit-code 1 \
+          --format sarif --output $(Build.ArtifactStagingDirectory)/trivy-sarif/trivy-fs.sarif .
+        echo "trivy fs OK: sin HIGH/CRITICAL en el filesystem"
+
+  # Gate 3b: Trivy sobre el WAR publicado por REQ-03. Si el WAR no existe en
+  # el agente local, falla controlado (nunca verde falso).
+  - task: Bash@3
+    displayName: Gate Trivy WAR (HIGH/CRITICAL)
+    inputs:
+      targetType: inline
+      failOnStderr: true
+      script: |
+        if ! command -v trivy > /dev/null 2>&1; then
+          echo "trivy no instalado en el agente: gate bloqueado" >&2
+          exit 1
+        fi
+        stage="$(Build.ArtifactStagingDirectory)/universal-package"
+        sarif="$(Build.ArtifactStagingDirectory)/trivy-sarif"
+        mkdir --parents "$sarif"
+        found=0
+        for war in "$stage"/*.war; do
+          if [ ! -e "$war" ]; then
+            continue
+          fi
+          found=1
+          trivy fs --severity HIGH,CRITICAL --exit-code 1 \
+            --format sarif --output "$sarif/trivy-war.sarif" "$war"
+        done
+        if [ "$found" -eq 0 ]; then
+          echo "sin WAR en $stage: gate bloqueado hasta publicar el artefacto" >&2
+          exit 1
+        fi
+        echo "trivy WAR OK: sin HIGH/CRITICAL en el WAR"
+
+  # Publica los reportes SARIF aunque un gate haya fallado (diagnostico).
+  - task: PublishPipelineArtifact@1
+    displayName: Publicar reportes SARIF de Trivy
+    condition: always()
+    inputs:
+      targetPath: $(Build.ArtifactStagingDirectory)/trivy-sarif
+      artifactName: trivy-sarif
