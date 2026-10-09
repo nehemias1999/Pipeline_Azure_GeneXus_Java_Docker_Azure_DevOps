@@ -1,6 +1,6 @@
 # Pipeline Azure DevOps — GeneXus Java + Docker + Tomcat
 
-CI/CD multi-stage (Build, Deploy_DEV, Deploy_QA, Deploy_PROD) que compila la app Java generada por GeneXus, publica el WAR versionado con SHA256 y lo despliega en Tomcat/Docker con gates de seguridad bloqueantes.
+CI/CD multi-stage (Build, Deploy_DEV, Deploy_QA, Deploy_PROD, RollbackPreflight + Rollback manual) que compila la app Java generada por GeneXus, publica el WAR versionado con SHA256 y lo despliega en Tomcat/Docker con gates de seguridad bloqueantes.
 
 ## Table of Contents
 
@@ -21,7 +21,7 @@ Azure DevOps Pipelines, GeneXus 18 (Java) + MSBuild, Java / Apache Tomcat, Docke
 
 ### Arquitectura / Flujo
 
-`azure-pipelines.yml` (stages Build, Deploy_DEV auto en main, Deploy_QA/PROD con environment + approval) → `templates/build.yml` (compila y publica `java-application-dev:<version>` + `.sha256` + SBOM + tag `v<version>`) → `templates/security-scan.yml` (Gitleaks, Trivy fs/WAR con SARIF, yamllint) → `templates/deploy.yml` (descarga version exacta, verifica SHA, `scripts/deploy-docker-tomcat.sh` o `scripts/deploy-docker-tomcat.ps1` con backup/healthcheck/rollback). Build publica `pipeline-metadata` y `release-summary` (version, commit, artefacto, SHA256, environment, aprobador; retencion 30 dias); cada deploy se anota con timestamp + aprobador (`$(Build.RequestedFor)` en runtime).
+`azure-pipelines.yml` (stages Build, Deploy_DEV auto en main, Deploy_QA/PROD con environment + approval) → `templates/build.yml` (compila y publica `java-application-dev:<version>` + `.sha256` + SBOM + tag `v<version>`) → `templates/security-scan.yml` (Gitleaks, Trivy fs/WAR con SARIF, yamllint) → `templates/deploy.yml` (descarga version exacta, verifica SHA, `scripts/deploy-docker-tomcat.sh` o `scripts/deploy-docker-tomcat.ps1` con backup/healthcheck/rollback). Build publica `pipeline-metadata` y `release-summary` (version, commit, artefacto, SHA256, environment, aprobador; retencion 30 dias); cada deploy se anota con timestamp + aprobador (`$(Build.RequestedFor)` en runtime). Rollback manual a PROD en dos stages: `RollbackPreflight` resuelve `rollbackVersion` (default `previous-stable` → variable `previousStableVersion`, fallback al tag `v*` estable previo) y falla rapido pre-deploy listando versiones disponibles si no existe; `Rollback` redespliega el artefacto exacto reusando `templates/deploy.yml` (healthcheck 200) y lo anota como rollback con timestamp + aprobador.
 
 Spec fuente de verdad: `openspec/changes/hardening-cicd-pipeline/specs/observability-docs/spec.md`.
 
@@ -36,7 +36,7 @@ python3 -m unittest discover -s tests -p "*_test.py"
 
 ## Usage
 
-Push a `main` corre Build + Deploy_DEV; QA/PROD avanzan tras approval del environment en Azure DevOps. Run manual con parametros `environment` (DEV/QA/PROD) y `version` (default `1.0.$(Build.BuildId)`). Auditoria de un deploy (ej. `PROD 1.0.42`): descargar el artefacto `release-summary` del build y leer `release-summary.json` (version, commit, sha256, aprobador, timestamp).
+Push a `main` corre Build + Deploy_DEV; QA/PROD avanzan tras approval del environment en Azure DevOps. Run manual con parametros `environment` (DEV/QA/PROD) y `version` (default `1.0.$(Build.BuildId)`). Rollback manual: encolar run manual con `rollbackVersion` (default `previous-stable`, o version exacta) y opcional `previousStableVersion`; solo corren `RollbackPreflight` + `Rollback` (nunca en PR/auto). Auditoria de un deploy (ej. `PROD 1.0.42`): descargar el artefacto `release-summary` del build y leer `release-summary.json` (version, commit, sha256, aprobador, timestamp).
 
 ## API / Configuration
 
@@ -48,6 +48,8 @@ Push a `main` corre Build + Deploy_DEV; QA/PROD avanzan tras approval del enviro
 | `ServerPassword`, `ApplicationKey`, `SshPrivateKey`, `SshKnownHosts` | si (via Key Vault) | — | nunca en repo |
 | `healthUrl_<ENV>` | no | `http://localhost:8080/` | URL http(s) |
 | `releaseRetentionDays` | no | `30` | dias (retencion en Project Settings > Pipelines > Retention) |
+| `rollbackVersion` (param, solo Rollback manual) | no | `previous-stable` | alias o version exacta (`1.0.42`) |
+| `previousStableVersion` | no | `""` (fallback: tag `v*` estable previo) | fuente determinista de `previous-stable` |
 
 ## Contributing
 

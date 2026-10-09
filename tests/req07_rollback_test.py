@@ -114,6 +114,46 @@ class TestVersionInexistenteFailFast(unittest.TestCase):
         self.assertLess(failfast.start(), deploy.start())
 
 
+class TestCrossStageWiring(unittest.TestCase):
+    """La version resuelta cruza de RollbackPreflight a Rollback via output.
+
+    Fuente: MS Learn "Use outputs in a different stage" — sin isOutput=true
+    + stageDependencies la variable llegaria vacia al stage siguiente.
+    """
+
+    def test_setvariable_con_isoutput(self) -> None:
+        section = rollback_section()
+        self.assertRegex(
+            section,
+            r"task\.setvariable variable=resolvedRollbackVersion;isOutput=true",
+        )
+
+    def test_rollback_consume_stage_dependencies(self) -> None:
+        section = rollback_section()
+        self.assertRegex(
+            section,
+            r"stageDependencies\.RollbackPreflight\.ResolveVersion\.outputs\[",
+        )
+        self.assertRegex(
+            section,
+            r"outputs\[.*resolvedRollbackVersion.*\]",
+        )
+
+
+class TestReadmeSinDrift(unittest.TestCase):
+    """Anti-drift: el README cita los stages y parametros del rollback."""
+
+    def test_readme_cita_rollback(self) -> None:
+        text = read(os.path.join(ROOT, "README.md"))
+        for token in (
+            "RollbackPreflight",
+            "Rollback",
+            "rollbackVersion",
+            "previousStableVersion",
+        ):
+            self.assertIn(token, text)
+
+
 class TestHealthcheckFixtureLocal(unittest.TestCase):
     """Healthcheck real contra fixture local; skip explicito si no es posible."""
 

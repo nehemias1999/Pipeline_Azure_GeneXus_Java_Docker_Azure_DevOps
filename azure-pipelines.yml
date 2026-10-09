@@ -281,6 +281,10 @@ stages:
         steps:
           - task: Bash@3
             displayName: Resolver previous-stable y validar en feed
+            # Nombre requerido: el stage Rollback consume esta variable via
+            # stageDependencies (ver MS Learn "Use outputs in a different
+            # stage"); sin isOutput=true llegaria vacia al stage siguiente.
+            name: SetResolvedVersion
             inputs:
               targetType: inline
               failOnStderr: true
@@ -298,7 +302,7 @@ stages:
                   echo "version de rollback vacia" >&2
                   exit 1
                 fi
-                echo "##vso[task.setvariable variable=resolvedRollbackVersion]$ROLLBACK_VERSION"
+                echo "##vso[task.setvariable variable=resolvedRollbackVersion;isOutput=true]$ROLLBACK_VERSION"
                 if command -v az >/dev/null 2>&1; then
                   if ! az artifacts universal show --feed "$(artifactFeed)" --name java-application-dev --version "$ROLLBACK_VERSION" >/dev/null 2>&1; then
                     echo "version inexistente: $ROLLBACK_VERSION (fail-fast pre-deploy, servidor intacto)" >&2
@@ -323,6 +327,13 @@ stages:
       and(succeeded(),
           eq(variables['Build.Reason'], 'Manual'),
           ne(variables['Build.Reason'], 'PullRequest'))
+    # Cableado cross-stage: la version resuelta en RollbackPreflight solo
+    # cruza como output variable (isOutput=true); se mapea aqui a nivel de
+    # stage para que ambos jobs (deploy endurecido + anotacion) la vean como
+    # $(resolvedRollbackVersion). Fuente: MS Learn "Use outputs in a
+    # different stage" (stageDependencies.STAGE.JOB.outputs['STEP.VAR']).
+    variables:
+      resolvedRollbackVersion: $[ stageDependencies.RollbackPreflight.ResolveVersion.outputs['SetResolvedVersion.resolvedRollbackVersion'] ]
     jobs:
       - template: templates/deploy.yml
         parameters:
