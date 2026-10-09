@@ -25,6 +25,10 @@
 #   configura en Project Settings > Pipelines > Retention); se declara aqui
 #   la politica exigida (retention 30 dias) y el pipeline la documenta.
 # Fuente variables predefinidas: https://learn.microsoft.com/en-us/azure/devops/pipelines/build/variables
+# REQ-07 rollback: parametro rollbackVersion (default previous-stable) y
+#   variable previousStableVersion (fuente determinista de la estable previa,
+#   seteable en queue-time o via release-summary/tag); stages RollbackPreflight
+#   (fail-fast pre-deploy) + Rollback manual que reusa templates/deploy.yml.
 # ==============================================================================
 
 trigger:
@@ -51,6 +55,11 @@ parameters:
     displayName: Version del artefacto
     type: string
     default: 1.0.$(Build.BuildId)
+  # REQ-07: version objetivo del rollback (alias previous-stable o exacta).
+  - name: rollbackVersion
+    displayName: Version objetivo del rollback
+    type: string
+    default: previous-stable
   # REQ-02: nombres de vault/group por variable (defaults del change).
   - name: keyVaultName
     displayName: Nombre del Azure Key Vault
@@ -66,6 +75,13 @@ variables:
   - group: ${{ parameters.vaultGroup }}
   - name: appVersion
     value: ${{ parameters.version }}
+  # REQ-07: fuente determinista de la estable previa. `previous-stable` se
+  #   resuelve a previousStableVersion si esta seteada (queue-time o variable
+  #   group), sino al tag v* estable previo (segundo tag ordenado por version).
+  - name: previousStableVersion
+    value: ""
+  - name: rollbackVersion
+    value: ${{ parameters.rollbackVersion }}
   - name: artifactFeed
     value: java-app-artifacts
   - name: keyVaultName
@@ -246,3 +262,107 @@ stages:
           environment: PROD
           version: $(appVersion)
           artifactFeed: $(artifactFeed)
+
+  # RollbackPreflight: fail-fast pre-deploy del rollback (REQ-07). Resuelve
+  # `previous-stable` de forma determinista (variable previousStableVersion,
+  # fallback al tag v* estable previo) y verifica que la version exista en el
+  # feed ANTES de tocar el servidor; si no existe, falla listando las
+  # versiones disponibles con el servidor intacto. Manual: nunca en PR/auto.
+  - stage: RollbackPreflight
+    displayName: Preflight rollback (fail-fast)
+    condition: >-
+      and(succeeded(),
+          eq(variables['Build.Reason'], 'Manual'),
+          ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - job: ResolveVersion
+        displayName: Resolver version y fail-fast si no existe
+        timeoutInMinutes: 10
+        steps:
+          - task: Bash@3
+            displayName: Resolver previous-stable y validar en feed
+            # Nombre requerido: el stage Rollback consume esta variable via
+            # stageDependencies (ver MS Learn "Use outputs in a different
+            # stage"); sin isOutput=true llegaria vacia al stage siguiente.
+            name: SetResolvedVersion
+            inputs:
+              targetType: inline
+              failOnStderr: true
+              script: |
+                ROLLBACK_VERSION="$(rollbackVersion)"
+                if [ "$ROLLBACK_VERSION" = "previous-stable" ]; then
+                  if [ -n "$(previousStableVersion)" ]; then
+                    ROLLBACK_VERSION="$(previousStableVersion)"
+                  else
+                    ROLLBACK_VERSION="$(git tag --list 'v*' --sort=-v:refname | sed -n '2p' | sed 's/^v//')"
+                  fi
+                  echo "previous-stable resuelto a: $ROLLBACK_VERSION"
+                fi
+                if [ -z "$ROLLBACK_VERSION" ]; then
+                  echo "version de rollback vacia" >&2
+                  exit 1
+                fi
+                echo "##vso[task.setvariable variable=resolvedRollbackVersion;isOutput=true]$ROLLBACK_VERSION"
+                if command -v az >/dev/null 2>&1; then
+                  if ! az artifacts universal show --feed "$(artifactFeed)" --name java-application-dev --version "$ROLLBACK_VERSION" >/dev/null 2>&1; then
+                    echo "version inexistente: $ROLLBACK_VERSION (fail-fast pre-deploy, servidor intacto)" >&2
+                    echo "versiones disponibles:" >&2
+                    az artifacts universal list --feed "$(artifactFeed)" --name java-application-dev --query "[].version" >&2 || true
+                    exit 1
+                  fi
+                  echo "version $ROLLBACK_VERSION existe en $(artifactFeed)"
+                else
+                  echo "az CLI ausente: validacion contra feed omitida (skip explicito); la descarga exacta falla cerrado si la version no existe"
+                fi
+
+  # Rollback: stage MANUAL (REQ-07). Nunca corre en PR/auto (Build.Reason
+  #   Manual + exclusion PullRequest). Reusa el flujo endurecido de REQ-04
+  #   (templates/deploy.yml: checksum, backup, healthcheck, restore) contra
+  #   PROD con el artefacto EXACTO resuelto en el preflight; el healthcheck
+  #   del flujo endurecido debe dar 200 antes de la anotacion de cierre.
+  - stage: Rollback
+    displayName: Rollback manual a previous-stable
+    dependsOn: RollbackPreflight
+    condition: >-
+      and(succeeded(),
+          eq(variables['Build.Reason'], 'Manual'),
+          ne(variables['Build.Reason'], 'PullRequest'))
+    # Cableado cross-stage: la version resuelta en RollbackPreflight solo
+    # cruza como output variable (isOutput=true); se mapea aqui a nivel de
+    # stage para que ambos jobs (deploy endurecido + anotacion) la vean como
+    # $(resolvedRollbackVersion). Fuente: MS Learn "Use outputs in a
+    # different stage" (stageDependencies.STAGE.JOB.outputs['STEP.VAR']).
+    variables:
+      resolvedRollbackVersion: $[ stageDependencies.RollbackPreflight.ResolveVersion.outputs['SetResolvedVersion.resolvedRollbackVersion'] ]
+    jobs:
+      - template: templates/deploy.yml
+        parameters:
+          environment: PROD
+          version: $(resolvedRollbackVersion)
+          artifactFeed: $(artifactFeed)
+      # Anotacion de cierre: solo corre tras el deploy endurecido (healthcheck
+      #   200 verificado) y registra el evento como rollback con timestamp UTC
+      #   e identidad del aprobador en runtime (nunca hardcodeada).
+      - job: AnnotateRollback
+        displayName: Anotar rollback (timestamp + identidad)
+        dependsOn: Deploy
+        timeoutInMinutes: 10
+        steps:
+          - task: Bash@3
+            displayName: Anotar rollback verificado
+            inputs:
+              targetType: inline
+              failOnStderr: true
+              script: |
+                TIMESTAMP="$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+                mkdir --parents rollback-annotation
+                printf '{"type":"rollback","environment":"PROD","version":"%s","timestamp":"%s","approver":"%s","healthcheck":"200"}\n' \
+                  "$(resolvedRollbackVersion)" "$TIMESTAMP" "$(Build.RequestedFor)" \
+                  > rollback-annotation/annotation.json
+                cat rollback-annotation/annotation.json
+                echo "rollback PROD a $(resolvedRollbackVersion) verificado (healthcheck 200) por $(Build.RequestedFor) en $TIMESTAMP"
+          - task: PublishPipelineArtifact@1
+            displayName: Publicar anotacion de rollback
+            inputs:
+              targetPath: rollback-annotation
+              artifactName: rollback-annotation
